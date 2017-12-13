@@ -204,7 +204,7 @@ namespace hanHttpLib
 					}
 					else
 					{
-						StreamReader res_stm_rdr = new StreamReader (res_stm, Encoding.Default);
+						StreamReader res_stm_rdr = new StreamReader (res_stm, Encoding.UTF8);
 						m_result_data = res_stm_rdr.ReadToEnd ();
 					}
 				}

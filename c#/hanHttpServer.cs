@@ -76,7 +76,6 @@ namespace hanHttpLib
 			m_listener = null;
 		}
 
-		private delegate void del_write_stream (Stream stm, String data);
 		private delegate string del_get_value (string key);
 
 		/// <summary>
@@ -152,18 +151,14 @@ namespace hanHttpLib
 				string[] encoding = req.Headers["Accept-Encoding"].Split (new char[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
 				for (int i = 0; i < encoding.Length; ++i)
 					encoding[i] = encoding[i].Trim ();
-				del_write_stream write_stream = (stream, data) =>
-				{
-					using (StreamWriter sw = new StreamWriter (stream, Encoding.UTF8))
-						sw.Write (data);
-				};
+				byte[] write_data = Encoding.UTF8.GetBytes (str);
 				if (Array.IndexOf (encoding, "gzip") >= 0)
 				{
 					// 使用 gzip 压缩
 					res.AppendHeader ("Content-Encoding", "gzip");
 					res.AppendHeader ("Vary", "Accept-Encoding");
 					using (GZipStream gzip = new GZipStream (res.OutputStream, CompressionMode.Compress))
-						write_stream (gzip, str);
+						gzip.Write (write_data, 0, write_data.Length);
 				}
 				else if (Array.IndexOf (encoding, "deflate") >= 0)
 				{
@@ -171,12 +166,12 @@ namespace hanHttpLib
 					res.AppendHeader ("Content-Encoding", "deflate");
 					res.AppendHeader ("Vary", "Accept-Encoding");
 					using (DeflateStream deflate = new DeflateStream (res.OutputStream, CompressionMode.Compress))
-						write_stream (deflate, str);
+						gzip.Write (deflate, 0, write_data.Length);
 				}
 				else
 				{
 					// 不使用压缩
-					write_stream (res.OutputStream, str);
+					res.OutputStream.Write (deflate, 0, write_data.Length);
 				}
 				res.OutputStream.Close ();
 			}

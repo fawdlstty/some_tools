@@ -9,14 +9,12 @@ using System.Threading;
 
 namespace hanSqlLib {
 	public class hanMysqlHelper: IDisposable {
-		public string m_db_name { get; private set; } = "";
 		private MySqlConnection m_conn = null;
 
 		private hanMysqlHelper () {}
 
-		public hanMysqlHelper (string db_name = "db_ticket") {
-			m_db_name = db_name;
-			m_conn = new MySqlConnection ($"Server=127.0.0.1;Database={m_db_name};Port=3306;User=root;Password=fe1AAf5S5F2e2aG;CharSet=utf8mb4;Connection Timeout=600;SslMode=none");
+		public hanMysqlHelper () {
+			m_conn = new MySqlConnection ($"Server=127.0.0.1;Database=db_test;Port=3306;User=root;Password=123456;CharSet=utf8mb4;Connection Timeout=600;SslMode=none");
 			m_conn.Open ();
 		}
 
@@ -29,16 +27,6 @@ namespace hanSqlLib {
 				m_conn.Close ();
 			m_conn = null;
 			GC.SuppressFinalize (this);
-		}
-
-		public static hanMysqlHelper create_database (string db_name) {
-			using (var sql = new hanMysqlHelper ()) {
-				sql.m_conn = new MySqlConnection ($"Server=127.0.0.1;Port=3306;User=root;Password=fe1AAf5S5F2e2aG;CharSet=utf8mb4;Connection Timeout=600;SslMode=none");
-				sql._execute_yield ($"create database {db_name} default character set utf8mb4 collate utf8mb4_general_ci;", null, (cmd) => {
-					return cmd.ExecuteNonQuery ();
-				});
-			}
-			return new hanMysqlHelper (db_name);
 		}
 
 		private T _execute_yield<T> (string str_cmd, object[] values, Func<MySqlCommand, T> f) {

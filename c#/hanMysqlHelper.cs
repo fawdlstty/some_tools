@@ -11,8 +11,6 @@ namespace hanSqlLib {
 	public class hanMysqlHelper: IDisposable {
 		private MySqlConnection m_conn = null;
 
-		private hanMysqlHelper () {}
-
 		public hanMysqlHelper () {
 			m_conn = new MySqlConnection ($"Server=127.0.0.1;Database=db_test;Port=3306;User=root;Password=123456;CharSet=utf8mb4;Connection Timeout=600;SslMode=none");
 			m_conn.Open ();

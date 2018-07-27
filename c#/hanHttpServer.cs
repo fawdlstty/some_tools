@@ -7,178 +7,246 @@
 // Author URI:  https://www.fawdlstty.com/
 // Version:     0.1
 // License:     MIT
-// Last Update: Oct 27, 2017
+// Last Update: Jul 28, 2018
+// remarks:     使用此类需要先添加引用System.Web、Newtonsoft.Json
 //
 ////////////////////////////////////////////////////////////////////////////////
 
+using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Net;
 using System.Text;
 using System.Threading;
 using System.Web;
 
-namespace hanHttpLib
-{
-	public class hanHttpServer
-	{
-		HttpListener m_listener = null;
+namespace hanHttpLib {
+	public class hanHttpServer {
+		public hanHttpServer (params ushort [] ports) {
+			m_listener = new HttpListener ();
+			m_listener.AuthenticationSchemes = AuthenticationSchemes.Anonymous;
+			try {
+				foreach (var port in ports)
+					m_listener.Prefixes.Add ($"http://*:{port}/");
+				m_listener.Start ();
+			} catch (System.Net.HttpListenerException) {
+				m_listener = new HttpListener ();
+				m_listener.AuthenticationSchemes = AuthenticationSchemes.Anonymous;
+				foreach (var port in ports)
+					m_listener.Prefixes.Add ($"http://127.0.0.1:{port}/");
+				//m_listener.Prefixes.Add ($"http://localhost:{port}/");
+				//m_listener.Prefixes.Add ($"http://[::1]:{port}/");
+				m_listener.Start ();
+			}
+		}
 
-		public delegate HttpListener del_get_listener (string host);
+		public void run () {
+			while (true) {
+				try {
+					ThreadPool.QueueUserWorkItem (_o => {
+						if (_o == null)
+							return;
+						var ctx = _o as HttpListenerContext;
+						HttpListenerRequest req = ctx.Request;
+						HttpListenerResponse res = ctx.Response;
+						try {
+							// 获取请求命令
+							string cmd = req.RawUrl.Substring (1);
+							int _p = cmd.IndexOfAny (new char [] { '?', '#' });
+							if (_p > 0)
+								cmd = cmd.Substring (0, _p);
 
-		/// <summary>
-		/// 启动服务
-		/// </summary>
-		public void start (ushort uPort)
-		{
-			del_get_listener get_listener = host =>
-			{
-				HttpListener listener = new HttpListener ();
-				listener.AuthenticationSchemes = AuthenticationSchemes.Anonymous;
-				listener.Prefixes.Add (string.Format ("http://{0}:{1}/", host, m_cfg.m_server_port));
-				listener.Start ();
-				return listener;
+							// 获取请求内容
+							var get_param = new Dictionary<string, string> ();
+							foreach (string str_key in req.QueryString.AllKeys)
+								get_param [str_key] = req.QueryString [str_key];
+							var (post_param, post_file) = parse_form (req);
+
+							// 获取请求者IP
+							//string ip = req.UserHostAddress;
+							//if (ip.LastIndexOf (':') >= 3)
+							//	ip = ip.left (ip.LastIndexOf (':'));
+							//ip = ip.r (1, -1);
+							string ip = req.Headers["X-Real-IP"];
+							byte[] result_data = Encoding.UTF8.GetBytes ("Hello World!");
+							res.StatusCode = 200;
+
+							// HTTP头输入可以自定
+							res.AppendHeader ("Cache-Control", "private");
+							res.AppendHeader ("Content-Type", "text/html; charset=utf-8");
+							res.AppendHeader ("Server", "Microsoft-IIS/7.5"); // nginx/1.9.12
+							res.AppendHeader ("X-Powered-By", "ASP.NET");
+							res.AppendHeader ("X-AspNet-Version", "4.0.30319");
+							//res.AppendHeader ("Content-Length", "");
+
+							// 是否启用压缩
+							string[] encodings = (from p in req.Headers["Accept-Encoding"].Split (',') select p.Trim ().ToLower ()).ToArray ();
+							if (Array.IndexOf (encodings, "gzip") >= 0) {
+								// 使用 gzip 压缩
+								res.AppendHeader ("Content-Encoding", "gzip");
+								res.AppendHeader ("Vary", "Accept-Encoding");
+								using (GZipStream gzip = new GZipStream (res.OutputStream, CompressionMode.Compress))
+									gzip.Write (result_data, 0, result_data.Length);
+							} else if (Array.IndexOf (encodings, "deflate") >= 0) {
+								// 使用 deflate 压缩
+								res.AppendHeader ("Content-Encoding", "deflate");
+								res.AppendHeader ("Vary", "Accept-Encoding");
+								using (DeflateStream deflate = new DeflateStream (res.OutputStream, CompressionMode.Compress))
+									deflate.Write (result_data, 0, result_data.Length);
+							} else {
+								// 不使用压缩
+								res.OutputStream.Write (result_data, 0, result_data.Length);
+							}
+						} catch (Exception ex) {
+							Console.WriteLine ($"Catch Error: {ex.Message}");
+						} finally {
+							res.Close ();
+							GC.Collect ();
+						}
+					}, m_listener.GetContext ());
+				} catch (Exception ex) {
+					Console.WriteLine ($"Catch Error: {ex.Message}");
+				}
+			}
+		}
+
+		// 解析HTTP请求参数
+		private static Tuple<Dictionary<string, string>, Dictionary<string, Tuple<string, byte []>>> parse_form (HttpListenerRequest req) {
+			// 从流中读取一行字节数组
+			Func<Stream, byte[]> _read_bytes_line = (_stm) => {
+				using (var resultStream = new MemoryStream()) {
+					byte last_byte = 0;
+					while (true) {
+						int data = _stm.ReadByte();
+						resultStream.WriteByte ((byte) data);
+						if (data == 10 && last_byte == 13)
+							break;
+						last_byte = (byte) data;
+					}
+					resultStream.Position = 0;
+					byte[] dataBytes = new byte[resultStream.Length];
+					resultStream.Read (dataBytes, 0, dataBytes.Length);
+					return dataBytes;
+				}
 			};
-			try
-			{
-				if (m_listener != null)
-					return true;
-				try
-				{
-					m_listener = get_listener ("+");
-				}
-				catch (HttpListenerException)
-				{
-					System.Windows.Forms.MessageBox.Show ("无管理员权限，将以本地方式监听端口");
-					m_listener = get_listener ("localhost");
-				}
-				m_listener.BeginGetContext (_on_client_request, m_listener);
-				return true;
-			}
-			catch (Exception ex)
-			{
-				m_log.show_info ("Catch Error: {0}".format (ex.Message));
-			}
-			return false;
-		}
 
-		/// <summary>
-		/// 停止服务
-		/// </summary>
-		public void stop ()
-		{
-			if (m_listener == null)
-				return;
-			m_listener.Stop ();
-			m_listener.Close ();
-			m_listener = null;
-		}
-
-		private delegate string del_get_value (string key);
-
-		/// <summary>
-		/// 当客户端请求时的异步回调函数
-		/// </summary>
-		/// <param name="result"></param>
-		private void _on_client_request (IAsyncResult result)
-		{
-			HttpListener _listener = (HttpListener) result.AsyncState;
-			if (_listener == null || m_listener == null || !_listener.IsListening)
-				return;
-			HttpListenerContext ctx = _listener.EndGetContext (result);
-			ThreadPool.QueueUserWorkItem (_ctx =>
-			{
-				_process_request ((HttpListenerContext) _ctx);
-			}, ctx);
-			_listener.BeginGetContext (_on_client_request, _listener);
-		}
-
-		private void _process_request (HttpListenerContext ctx)
-		{
-			try
-			{
-				HttpListenerRequest req = ctx.Request;
-				HttpListenerResponse res = ctx.Response;
-				string str_url = req.RawUrl.Substring (1);
-
-				// 读取Post参数
-				List<string> post_keys = new List<string> (), post_values = new List<string> ();
-				using (StreamReader sr = new StreamReader (req.InputStream))
-				{
-					string[] pairs = sr.ReadToEnd ().Split (new char[] { '&' }, StringSplitOptions.RemoveEmptyEntries);
-					foreach (string pair in pairs)
-					{
-						string[] item = pair.Split (new char[] { '=' });
-						if (item.Length > 1)
-						{
-							post_keys.Add (HttpUtility.UrlDecode (item[0]));
-							post_values.Add (HttpUtility.UrlDecode (item[1]));
+			// 返回数据
+			var post_param = new Dictionary<string, string> ();
+			var post_file = new Dictionary<string, Tuple<string, byte[]>> ();
+			try {
+				if (req.HttpMethod != "POST") {
+					return Tuple.Create (post_param, post_file);
+				} else if (left_is (req.ContentType, "multipart/form-data;")) {
+					Encoding encoding = req.ContentEncoding;
+					string[] values = req.ContentType.Split (';').Skip (1).ToArray ();
+					string boundary = string.Join (";", values).Replace ("boundary=", "").Trim ();
+					byte[] bytes_boundary = encoding.GetBytes ($"--{boundary}\r\n");
+					byte[] bytes_end_boundary = encoding.GetBytes ($"--{boundary}--\r\n");
+					Stream SourceStream = req.InputStream;
+					var bytes = _read_bytes_line (SourceStream);
+					if (bytes == bytes_end_boundary) {
+						return Tuple.Create (post_param, post_file);
+					} else if (!compare (bytes, bytes_boundary)) {
+						Console.WriteLine ("Parse Error in [first read is not bytes_boundary]");
+						return Tuple.Create (post_param, post_file);
+					}
+					while (true) {
+						bytes = _read_bytes_line (SourceStream);
+						string _tmp = encoding.GetString (bytes);//Content-Disposition: form-data; name="text_"
+						if (!left_is (_tmp, "Content-Disposition:")) {
+							Console.WriteLine ("Parse Error in [begin block is not Content-Disposition]");
+							return Tuple.Create (post_param, post_file);
+						}
+						string name = substr_mid (_tmp, "name=\"", "\"");
+						string filename = substr_mid (_tmp, "filename=\"", "\"");
+						do {
+							bytes = _read_bytes_line (SourceStream);
+						} while (bytes [0] != 13 || bytes [1] != 10);
+						bytes = _read_bytes_line (SourceStream);
+						using (var ms = new MemoryStream ()) {
+							while (!compare (bytes, bytes_boundary) && !compare (bytes, bytes_end_boundary)) {
+								ms.Write (bytes);
+								bytes = _read_bytes_line (SourceStream);
+							}
+							if (ms.Length < 2) {
+								Console.WriteLine ("Parse Error in [ms.Length < 2]");
+								return Tuple.Create (post_param, post_file);
+							}
+							bytes = new byte [ms.Length - 2];
+							if (bytes.Length > 2) {
+								ms.Position = 0;
+								ms.Read (bytes);
+							}
+							if (string.IsNullOrEmpty (filename)) {
+								post_param [name] = encoding.GetString (bytes);
+							} else {
+								post_file [name] = Tuple.Create (filename, bytes);
+							}
+						}
+					}
+				} else {
+					using (StreamReader sr = new StreamReader (req.InputStream, Encoding.UTF8)) {
+						string post_data = sr.ReadToEnd ();
+						if (post_data [0] == '{') {
+							JObject obj = JObject.Parse (post_data);
+							foreach (var (key, val) in obj)
+								post_param [HttpUtility.UrlDecode (key)] = HttpUtility.UrlDecode (val.ToString ());
+						} else {
+							string[] pairs = post_data.Split (new char[] { '&' }, StringSplitOptions.RemoveEmptyEntries);
+							foreach (string pair in pairs) {
+								int p = pair.IndexOf ('=');
+								if (p > 0)
+									post_param [HttpUtility.UrlDecode (pair.Substring (0, p))] = HttpUtility.UrlDecode (pair.Substring (p + 1));
+							}
 						}
 					}
 				}
-				// 获取请求参数
-				del_get_value get_value = (key) =>
-				{
-					string value = req.QueryString[key];
-					if (string.IsNullOrEmpty (value))
-					{
-						int p = post_keys.IndexOf (key);
-						if (p >= 0)
-							value = post_values[p];
-					}
-
-					if (string.IsNullOrEmpty (value))
-						return "";
-					return value;
-				};
-
-				// 此处根据str_url处理输出，假定输入内容写在str里
-				// 获取请求参数 get_value ("test")
-				string str = "ok";
-				res.StatusCode = 200;
-
-				// HTTP头输入可以自定
-				res.AppendHeader ("Cache-Control", "private");
-				res.AppendHeader ("Content-Type", "text/html; charset=utf-8");
-				//res.AppendHeader ("Server", "Microsoft-IIS/7.5"); //nginx/1.9.12
-				res.AppendHeader ("X-Powered-By", "ASP.NET");
-				res.AppendHeader ("X-AspNet-Version", "4.0.30319");
-				//res.AppendHeader ("Content-Length", "");
-
-				// 是否启用压缩
-				string[] encoding = req.Headers["Accept-Encoding"].Split (new char[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
-				for (int i = 0; i < encoding.Length; ++i)
-					encoding[i] = encoding[i].Trim ();
-				byte[] write_data = Encoding.UTF8.GetBytes (str);
-				if (Array.IndexOf (encoding, "gzip") >= 0)
-				{
-					// 使用 gzip 压缩
-					res.AppendHeader ("Content-Encoding", "gzip");
-					res.AppendHeader ("Vary", "Accept-Encoding");
-					using (GZipStream gzip = new GZipStream (res.OutputStream, CompressionMode.Compress))
-						gzip.Write (write_data, 0, write_data.Length);
-				}
-				else if (Array.IndexOf (encoding, "deflate") >= 0)
-				{
-					// 使用 deflate 压缩
-					res.AppendHeader ("Content-Encoding", "deflate");
-					res.AppendHeader ("Vary", "Accept-Encoding");
-					using (DeflateStream deflate = new DeflateStream (res.OutputStream, CompressionMode.Compress))
-						gzip.Write (deflate, 0, write_data.Length);
-				}
-				else
-				{
-					// 不使用压缩
-					res.OutputStream.Write (deflate, 0, write_data.Length);
-				}
-				res.OutputStream.Close ();
+			} catch (Exception ex) {
+				Console.WriteLine ($"Catch Error: {ex.Message}");
 			}
-			catch (Exception)
-			{
-				// something is wrong...
-			}
+			return Tuple.Create (post_param, post_file);
 		}
+
+		private static bool compare (byte [] arr1, byte [] arr2) {
+			if (arr1 == null && arr2 == null)
+				return true;
+			else if (arr1 == null || arr2 == null)
+				return false;
+			else if (arr1.Length != arr2.Length)
+				return false;
+			for (int i = 0; i < arr1.Length; ++i) {
+				if (arr1 [i] != arr2 [i])
+					return false;
+			}
+			return true;
+		}
+
+		public static bool left_is (string s, string s2) {
+			if (string.IsNullOrEmpty (s))
+				return string.IsNullOrEmpty (s2);
+			if (s.Length < s2.Length)
+				return false;
+			return s.Substring (0, s2.Length) == s2;
+		}
+
+		public static string substr_mid (string s, string begin, string end = "") {
+			if (string.IsNullOrEmpty (s) || string.IsNullOrEmpty (begin))
+				return "";
+			int p = s.IndexOf (begin);
+			if (p == -1)
+				return "";
+			s = s.Substring (p + begin.Length);
+			if (!string.IsNullOrEmpty (end)) {
+				p = s.IndexOf (end);
+				if (p >= 0)
+					s = s.Substring (0, p);
+			}
+			return s;
+		}
+
+		private HttpListener m_listener = null;
 	}
 }

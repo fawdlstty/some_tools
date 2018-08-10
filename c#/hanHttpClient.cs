@@ -18,6 +18,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Net;
 using System.Text;
+using System.Threading.Tasks;
 using System.Web;
 
 namespace hanHttpLib {
@@ -49,8 +50,65 @@ namespace hanHttpLib {
 			m_cookies = cookies;
 		}
 
-		// post请求
+		// post 同步请求
 		public byte [] post (string url, hanContentType ct = hanContentType.UrlEncode, params (string, string) [] param) {
+			var post_data = _get_post_data (ct, param);
+			return _request_impl (url, "POST", post_data.Item1, post_data.Item2);
+		}
+
+		// get 同步请求
+		public byte [] get (string url) {
+			return _request_impl (url, "GET");
+		}
+
+		// post 异步请求
+		public Task<byte []> post_async (string url, hanContentType ct = hanContentType.UrlEncode, params (string, string) [] param) {
+			try {
+				var post_data = _get_post_data (ct, param);
+				return _request_impl_async (url, "POST", post_data.Item1, post_data.Item2);
+			} catch (Exception) {
+				return null;
+			}
+		}
+
+		// get 异步请求
+		public Task<byte []> get_async (string url) {
+			try {
+				return _request_impl_async (url, "GET");
+			} catch (Exception) {
+				return null;
+			}
+		}
+
+		// 同步请求
+		private byte [] _request_impl (string url, string method, byte [] param_data = null, string content_type = "") {
+			_process_url (url);
+			HttpWebRequest req = _make_request (method, param_data, content_type);
+			using (HttpWebResponse res = (HttpWebResponse) req.GetResponse ())
+				return _get_response_data (res);
+		}
+
+		// 异步请求
+		private async Task<byte []> _request_impl_async (string url, string method, byte [] param_data = null, string content_type = "") {
+			_process_url (url);
+			HttpWebRequest req = _make_request (method, param_data, content_type);
+			using (HttpWebResponse res = (HttpWebResponse) await req.GetResponseAsync ())
+				return _get_response_data (res);
+		}
+
+		// 清除 utf8 bom
+		private static byte [] _clear_bom (byte [] data) {
+			if (data.Length > 3 && data [0] == '\xef' && data [1] == '\xbb' && data [2] == '\xbf') {
+				using (var ms = new MemoryStream ()) {
+					ms.Write (data, 3, data.Length - 3);
+					data = ms.ToArray ();
+				}
+			}
+			return data;
+		}
+
+		// 获取 post data
+		private (byte [], string) _get_post_data (hanContentType ct = hanContentType.UrlEncode, params (string, string) [] param) {
 			string boundary = $"----hanHttpClient_{System.Guid.NewGuid ().ToString ("N").Substring (0, 8)}", crlf = "\r\n";
 			string content_type = new Dictionary<hanContentType, string> {
 				[hanContentType.UrlEncode] = "application/x-www-form-urlencoded",
@@ -76,33 +134,11 @@ namespace hanHttpLib {
 			}
 			sb.Append (ct == hanContentType.Json ? "}" : (ct == hanContentType.FormData ? $"--{boundary}--" : ""));
 			byte [] param_data = Encoding.UTF8.GetBytes (sb.ToString ());
-			return request_impl (url, "POST", param_data, content_type);
+			return (param_data, content_type);
 		}
 
-		// get请求
-		public byte [] get (string url) {
-			return request_impl (url, "GET");
-		}
-
-		private hanUserAgent m_ua;
-		private CookieCollection m_cookies = new CookieCollection ();
-		public static int m_timeout_ms = 10000;
-		public string m_last_url = "";
-
-		// 清除 utf8 bom
-		private static byte [] clear_bom (byte [] data) {
-			if (data.Length > 3 && data [0] == '\xef' && data [1] == '\xbb' && data [2] == '\xbf') {
-				using (var ms = new MemoryStream ()) {
-					ms.Write (data, 3, data.Length - 3);
-					data = ms.ToArray ();
-				}
-			}
-			return data;
-		}
-
-		// 请求的实现
-		private byte [] request_impl (string url, string method, byte [] param_data = null, string content_type = "") {
-			// 生成请求
+		// 处理 url
+		private void _process_url (string url) {
 			if (url.Length < 8 || (url.Substring (0, 7) != "http://" && url.Substring (0, 8) != "https://")) {
 				if (m_last_url == "") {
 					throw new ArgumentException ("url format error");
@@ -115,9 +151,12 @@ namespace hanHttpLib {
 				}
 			}
 			m_last_url = url;
-			
-			var uri = new Uri (url); // url.IndexOf ('/', 8) >= 0 ? url.Substring (0, url.IndexOf ('/', 8)) : url
-			HttpWebRequest req = (HttpWebRequest) WebRequest.Create (uri);
+		}
+
+		// 生成 request 请求
+		private HttpWebRequest _make_request (string method, byte [] param_data = null, string content_type = "") {
+			var uri = new Uri (m_last_url);
+			HttpWebRequest req = WebRequest.CreateHttp (uri);
 			req.Method = method;
 			req.AllowAutoRedirect = true;
 			req.Accept = "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8";
@@ -142,38 +181,41 @@ namespace hanHttpLib {
 				using (Stream req_stm = req.GetRequestStream ())
 					req_stm.Write (param_data, 0, param_data.Length);
 			}
+			return req;
+		}
 
-			// 发起请求
-			GC.Collect ();
-			byte [] ret = null;
-			using (HttpWebResponse res = (HttpWebResponse) req.GetResponse ()) {
-				using (Stream res_stm = res.GetResponseStream ()) {
-					using (MemoryStream dms = new MemoryStream ()) {
-						int len = 0;
-						byte [] bytes = new byte [1024];
-						if (res.ContentEncoding == "gzip") {
-							using (GZipStream gzip = new GZipStream (res_stm, CompressionMode.Decompress)) {
-								while ((len = gzip.Read (bytes, 0, bytes.Length)) > 0)
-									dms.Write (bytes, 0, len);
-								dms.Seek (0, SeekOrigin.Begin);
-								ret = dms.ToArray ();
-							}
-						} else if (res.ContentEncoding == "deflate") {
-							using (DeflateStream deflate = new DeflateStream (res_stm, CompressionMode.Decompress)) {
-								while ((len = deflate.Read (bytes, 0, bytes.Length)) > 0)
-									dms.Write (bytes, 0, len);
-								dms.Seek (0, SeekOrigin.Begin);
-								ret = dms.ToArray ();
-							}
-						} else {
-							using (StreamReader res_stm_rdr = new StreamReader (res_stm, Encoding.UTF8))
-								ret = clear_bom (Encoding.UTF8.GetBytes (res_stm_rdr.ReadToEnd ()));
+		// 获取 response data
+		private static byte [] _get_response_data (HttpWebResponse res) {
+			using (Stream res_stm = res.GetResponseStream ()) {
+				using (MemoryStream dms = new MemoryStream ()) {
+					int len = 0;
+					byte [] bytes = new byte [1024];
+					if (res.ContentEncoding == "gzip") {
+						using (GZipStream gzip = new GZipStream (res_stm, CompressionMode.Decompress)) {
+							while ((len = gzip.Read (bytes, 0, bytes.Length)) > 0)
+								dms.Write (bytes, 0, len);
+							dms.Seek (0, SeekOrigin.Begin);
+							return dms.ToArray ();
 						}
+					} else if (res.ContentEncoding == "deflate") {
+						using (DeflateStream deflate = new DeflateStream (res_stm, CompressionMode.Decompress)) {
+							while ((len = deflate.Read (bytes, 0, bytes.Length)) > 0)
+								dms.Write (bytes, 0, len);
+							dms.Seek (0, SeekOrigin.Begin);
+							return dms.ToArray ();
+						}
+					} else {
+						using (StreamReader res_stm_rdr = new StreamReader (res_stm, Encoding.UTF8))
+							return _clear_bom (Encoding.UTF8.GetBytes (res_stm_rdr.ReadToEnd ()));
 					}
 				}
 			}
-			return ret;
 		}
+
+		private hanUserAgent m_ua;
+		private CookieCollection m_cookies = new CookieCollection ();
+		public static int m_timeout_ms = 10000;
+		public string m_last_url = "";
 	}
 
 	class _hanHttpInit {

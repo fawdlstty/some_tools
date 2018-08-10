@@ -1,4 +1,4 @@
-﻿////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
 //
 // Class Name:  hanHttpClient
 // Description: C# HTTP客户端类
@@ -7,253 +7,166 @@
 // Author URI:  https://www.fawdlstty.com/
 // Version:     0.1
 // License:     MIT
-// Last Update: Jul 28, 2018
+// Last Update: Aug 10, 2018
 // remarks:     使用此类需要先添加引用System.Web
 //
 ////////////////////////////////////////////////////////////////////////////////
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Net;
 using System.Text;
-using System.Threading;
 using System.Web;
 
 namespace hanHttpLib {
-	public enum hanHttp_UserAgent {
-		Android = 0,
-		Chrome,
-		Ie,
-	}
+	public enum hanUserAgent { Android, Chrome, Edge, Ie }
+	public enum hanContentType { UrlEncode, Json, Xml, FormData }
 
 	public class hanHttpClient {
-		/// <summary>
-		/// 构造函数
-		/// </summary>
-		/// <param name="strUrl">请求路径</param>
-		/// <param name="strType"></param>
-		/// <param name="bSimulatePC"></param>
-		public hanHttpClient (hanHttp_UserAgent uaType = hanHttp_UserAgent.Chrome, string strType = "POST") {
-			m_uaType = uaType;
-			m_strType = strType.ToUpper ();
+		public hanHttpClient (hanUserAgent ua = hanUserAgent.Chrome) {
+			m_ua = ua;
+		}
 
-			if (System.Net.ServicePointManager.DefaultConnectionLimit != 200) {
-				System.Net.ServicePointManager.DefaultConnectionLimit = 200;
-				ServicePointManager.ServerCertificateValidationCallback = new System.Net.Security.RemoteCertificateValidationCallback ((sender, certificate, chain, errors) => {
-					return true;
-				});
+		// 添加cookie
+		public void add_cookie (string name, string value, string path = "/") {
+			m_cookies.Add (new Cookie (name, value, path));
+		}
+
+		// 获取cookie
+		public (string, string) get_cookie (string name) {
+			return (m_cookies [name]?.Name ?? "", m_cookies [name]?.Value ?? "");
+		}
+
+		// 删除cookie
+		public void del_cookie (string name) {
+			var cookies = new CookieCollection ();
+			foreach (Cookie cookie in m_cookies) {
+				if (cookie.Name != name)
+					cookies.Add (cookie);
 			}
+			m_cookies = cookies;
 		}
 
-		/// <summary>
-		/// 添加参数，参数类型根据声明动态解析为POST或GET
-		/// </summary>
-		/// <param name="strKey">键</param>
-		/// <param name="strValue">值</param>
-		public void add_param (string strKey, string strValue) {
-			if (m_sbParams.Length > 0)
-				m_sbParams.Append ('&');
-			m_sbParams.Append (HttpUtility.UrlEncode (strKey)).Append ("=").Append (HttpUtility.UrlEncode (strValue));
-		}
-
-		/// <summary>
-		/// 添加参数，参数类型根据声明动态解析为POST或GET
-		/// </summary>
-		/// <param name="strKey">键</param>
-		/// <param name="strValue">值</param>
-		public void add_param_gzip (string strKey, string strValue) {
-			if (m_sbParams.Length > 0)
-				m_sbParams.Append ('&');
-			using (MemoryStream ms = new MemoryStream ()) {
-				byte[] bytes = null;
-				using (GZipStream gzip = new GZipStream (ms, CompressionMode.Compress, true)) {
-					bytes = Encoding.UTF8.GetBytes (strValue);
-					gzip.Write (bytes, 0, bytes.Length);
+		// post请求
+		public byte [] post (string url, hanContentType ct = hanContentType.UrlEncode, params (string, string) [] param) {
+			string boundary = $"----hanHttpClient_{System.Guid.NewGuid ().ToString ("N").Substring (0, 8)}", crlf = "\r\n";
+			string content_type = new Dictionary<hanContentType, string> {
+				[hanContentType.UrlEncode] = "application/x-www-form-urlencoded",
+				[hanContentType.Json] = "application/json",
+				[hanContentType.Xml] = "text/xml",
+				[hanContentType.FormData] = $"multipart/form-data; boundary={boundary}"
+			} [ct];
+			Func<string, string> _my_encode = (s) => s.Replace ("\\", "\\\\").Replace ("\"", "\\\"");
+			StringBuilder sb = new StringBuilder ();
+			foreach (var (key, value) in param) {
+				if (ct == hanContentType.UrlEncode) {
+					sb.Append (sb.Length == 0 ? "" : "&");
+					sb.Append ($"{HttpUtility.UrlEncode (key)}={HttpUtility.UrlEncode (value)}");
+				} else if (ct == hanContentType.Json) {
+					sb.Append (sb.Length == 0 ? "{" : ",");
+					sb.Append ($@"""{_my_encode (key)}"":""{_my_encode (value)}""");
+				} else if (ct == hanContentType.Xml) {
+					sb.Append (sb.Length == 0 ? @"<?xml version=""1.0"" encoding=""UTF-8""?>" : "");
+					sb.Append ($"<{HttpUtility.UrlEncode (key)}>{HttpUtility.UrlEncode (value)}</{HttpUtility.UrlEncode (key)}>");
+				} else if (ct == hanContentType.FormData) {
+					sb.Append ($@"--{boundary}{crlf}Content-Disposition: form-data; name=""{_my_encode (key)}""{crlf}{crlf}{value}{crlf}");
 				}
-				strValue = Convert.ToBase64String (ms.ToArray ()).Replace ('+', '*').Replace ('/', '-').Replace ("=", "");
 			}
-			m_sbParams.Append (HttpUtility.UrlEncode (strKey)).Append ("=").Append (HttpUtility.UrlEncode (strValue));
+			sb.Append (ct == hanContentType.Json ? "}" : (ct == hanContentType.FormData ? $"--{boundary}--" : ""));
+			byte [] param_data = Encoding.UTF8.GetBytes (sb.ToString ());
+			return request_impl (url, "POST", param_data, content_type);
 		}
 
-		/// <summary>
-		/// 添加Cookie
-		/// </summary>
-		/// <param name="strKey">键</param>
-		/// <param name="strValue">值</param>
-		/// <param name="path">路径</param>
-		public void add_cookie (string strKey, string strValue, string path = "/") {
-			add_cookie (new Cookie (strKey, strValue, path));
+		// get请求
+		public byte [] get (string url) {
+			return request_impl (url, "GET");
 		}
 
-		/// <summary>
-		/// 添加Cookie
-		/// </summary>
-		/// <param name="cookie">cookie</param>
-		public void add_cookie (Cookie cookie) {
-			m_cookies.Add (cookie);
-		}
+		private hanUserAgent m_ua;
+		private CookieCollection m_cookies = new CookieCollection ();
+		public static int m_timeout_ms = 10000;
 
-		/// <summary>
-		/// 添加一组Cookie
-		/// </summary>
-		/// <param name="cookies">Cookie集合</param>
-		public void add_cookie (CookieCollection cookies) {
-			if (cookies == null)
-				return;
-			foreach (Cookie c in cookies)
-				add_cookie (c);
-		}
-
-		/// <summary>
-		/// 获取一个Cookie
-		/// </summary>
-		/// <param name="strKey">键</param>
-		/// <returns></returns>
-		public Cookie get_cookie (string strKey) {
-			return m_cookies[strKey];
-		}
-
-		/// <summary>
-		/// 设置访问路径
-		/// </summary>
-		/// <param name="strUrl"></param>
-		public void set_url (string strUrl) {
-			m_strUrl = strUrl;
-
-			// 获取host
-			if (m_strUrl.Substring (0, 7).ToLower () != "http://" && m_strUrl.Substring (0, 8).ToLower () != "https://")
-				m_strUrl.Insert (0, "http://");
-			int p = m_strUrl.IndexOf ('/', 8);
-			m_uri_host = new Uri (p == -1 ? m_strUrl : m_strUrl.Substring (0, p));
-		}
-
-		/// <summary>
-		/// 发起请求
-		/// </summary>
-		/// <returns></returns>
-		public bool do_request () {
-			m_finish = false;
-			m_result_data = "";
-			try {
-				// 生成新URL
-				if (m_strType != "POST" && m_sbParams.Length > 0) {
-					char ch_last = m_strUrl[m_strUrl.Length - 1];
-					if (m_strUrl.IndexOf ('?') != -1 && ch_last != '?' && ch_last != '&')
-						m_strUrl += '&';
-					else if (m_strUrl.IndexOf ('?') == -1)
-						m_strUrl += '?';
-					m_strUrl += m_sbParams.ToString ();
+		// 清除 utf8 bom
+		private static byte [] clear_bom (byte [] data) {
+			if (data.Length > 3 && data [0] == '\xef' && data [1] == '\xbb' && data [2] == '\xbf') {
+				using (var ms = new MemoryStream ()) {
+					ms.Write (data, 3, data.Length - 3);
+					data = ms.ToArray ();
 				}
+			}
+			return data;
+		}
 
-				// 创建请求对象
-				HttpWebRequest req = (HttpWebRequest) WebRequest.Create (m_strUrl);
-				req.AllowAutoRedirect = false;
-				req.Accept = "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8";
-				req.Headers["Accept-Encoding"] = "gzip, deflate";
-				req.Headers["Accept-Language"] = "zh-CN,zh;q=0.8";
-				req.Headers["Cache-Control"] = "max-age=0";
-				req.KeepAlive = false;
-				req.Method = m_strType.ToUpper ();
-				if (m_uaType == hanHttp_UserAgent.Android)
-					req.UserAgent = "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/63.0.3223.8 Mobile Safari/537.36";
-				else if (m_uaType == hanHttp_UserAgent.Chrome)
-					req.UserAgent = "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/63.0.3223.8 Safari/537.36";
-				else if (m_uaType == hanHttp_UserAgent.Edge)
-					req.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/52.0.2743.116 Safari/537.36 Edge/15.15063";
-				else if (m_uaType == hanHttp_UserAgent.Ie)
-					req.UserAgent = "Mozilla/5.0 (Windows NT 10.0; WOW64; Trident/7.0; rv:11.0) like Gecko";
-				req.ContentType = "application/x-www-form-urlencoded";
-				req.Timeout = m_timeout;
-				req.ReadWriteTimeout = m_timeout;
-				req.CookieContainer = new CookieContainer ();
-				foreach (Cookie c in m_cookies)
-					req.CookieContainer.Add (m_uri_host, c);
+		// 请求的实现
+		private byte [] request_impl (string url, string method, byte [] param_data = null, string content_type = "") {
+			// 生成请求
+			var uri = new Uri (url); // url.IndexOf ('/', 8) >= 0 ? url.Substring (0, url.IndexOf ('/', 8)) : url
+			HttpWebRequest req = (HttpWebRequest) WebRequest.Create (uri);
+			req.Method = method;
+			req.AllowAutoRedirect = true;
+			req.Accept = "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8";
+			req.Headers ["Accept-Encoding"] = "gzip, deflate";
+			req.Headers ["Accept-Language"] = "zh-CN,zh;q=0.8";
+			req.Headers ["Cache-Control"] = "max-age=0";
+			req.KeepAlive = false;
+			req.UserAgent = new Dictionary<hanUserAgent, string> {
+				[hanUserAgent.Android] = "Mozilla/5.0 (Linux; Android 8.0; Pixel 2 Build/OPD3.170816.012) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/68.0.3440.75 Mobile Safari/537.36",
+				[hanUserAgent.Chrome] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/68.0.3440.75 Safari/537.36",
+				[hanUserAgent.Edge] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/64.0.3282.140 Safari/537.36 Edge/17.17134",
+				[hanUserAgent.Ie] = "Mozilla/5.0 (Windows NT 10.0; WOW64; Trident/7.0; rv:11.0) like Gecko"
+			} [m_ua];
+			req.ContentType = content_type;
+			req.Timeout = m_timeout_ms;
+			req.ReadWriteTimeout = m_timeout_ms;
+			req.CookieContainer = new CookieContainer ();
+			foreach (Cookie c in m_cookies)
+				req.CookieContainer.Add (uri, c);
+			req.ContentLength = param_data.Length;
+			if ((param_data?.Length ?? 0) > 0) {
+				using (Stream req_stm = req.GetRequestStream ())
+					req_stm.Write (param_data, 0, param_data.Length);
+			}
 
-				// 填入附加参数项
-				if (m_strType == "POST" && m_sbParams.Length > 0) {
-					byte[] barr_params = Encoding.UTF8.GetBytes (m_sbParams.ToString ());
-					req.ContentLength = barr_params.Length;
-					Stream req_stm = req.GetRequestStream ();
-					req_stm.Write (barr_params, 0, barr_params.Length);
-					req_stm.Close ();
-				}
-
-				// 提交请求
-				GC.Collect ();
-				HttpWebResponse res = (HttpWebResponse) req.GetResponse ();
-				if (res.StatusCode == HttpStatusCode.Moved || res.StatusCode == HttpStatusCode.Found) {
-					// 重定向
-					set_url (res.Headers["Location"]);
-					return do_request ();
-				}
-				Stream res_stm = res.GetResponseStream ();
-				using (MemoryStream dms = new MemoryStream ()) {
-					int len = 0;
-					byte[] bytes = new byte[1024];
-
-					if (res.ContentEncoding == "gzip") {
-						GZipStream gzip = new GZipStream (res_stm, CompressionMode.Decompress);
-						while ((len = gzip.Read (bytes, 0, bytes.Length)) > 0)
-							dms.Write (bytes, 0, len);
-						dms.Seek (0, SeekOrigin.Begin);
-						m_result_data = Encoding.UTF8.GetString (dms.ToArray ());
-					} else if (res.ContentEncoding == "deflate") {
-						DeflateStream deflate = new DeflateStream (res_stm, CompressionMode.Decompress);
-						while ((len = deflate.Read (bytes, 0, bytes.Length)) > 0)
-							dms.Write (bytes, 0, len);
-						dms.Seek (0, SeekOrigin.Begin);
-						m_result_data = Encoding.UTF8.GetString (dms.ToArray ());
-					} else {
-						StreamReader res_stm_rdr = new StreamReader (res_stm, Encoding.UTF8);
-						m_result_data = res_stm_rdr.ReadToEnd ();
+			// 发起请求
+			GC.Collect ();
+			byte [] ret = null;
+			using (HttpWebResponse res = (HttpWebResponse) req.GetResponse ()) {
+				using (Stream res_stm = res.GetResponseStream ()) {
+					using (MemoryStream dms = new MemoryStream ()) {
+						int len = 0;
+						byte [] bytes = new byte [1024];
+						if (res.ContentEncoding == "gzip") {
+							using (GZipStream gzip = new GZipStream (res_stm, CompressionMode.Decompress)) {
+								while ((len = gzip.Read (bytes, 0, bytes.Length)) > 0)
+									dms.Write (bytes, 0, len);
+								dms.Seek (0, SeekOrigin.Begin);
+								ret = dms.ToArray ();
+							}
+						} else if (res.ContentEncoding == "deflate") {
+							using (DeflateStream deflate = new DeflateStream (res_stm, CompressionMode.Decompress)) {
+								while ((len = deflate.Read (bytes, 0, bytes.Length)) > 0)
+									dms.Write (bytes, 0, len);
+								dms.Seek (0, SeekOrigin.Begin);
+								ret = dms.ToArray ();
+							}
+						} else {
+							using (StreamReader res_stm_rdr = new StreamReader (res_stm, Encoding.UTF8))
+								ret = clear_bom (Encoding.UTF8.GetBytes (res_stm_rdr.ReadToEnd ()));
+						}
 					}
 				}
-
-				// 获取cookie
-				m_cookies = res.Cookies;
-				res.Close ();
-				req.Abort ();
-				m_finish = true;
-				return true;
-			} catch (Exception ex) {
-				Console.WriteLine ($"Catch Error: {ex.Message}");
-				m_finish = true;
-				return false;
 			}
+			return ret;
 		}
+	}
 
-		/// <summary>
-		/// 异步发起请求
-		/// </summary>
-		/// <returns></returns>
-		public bool async_request () {
-			m_finish = false;
-			try {
-				new Thread (new ParameterizedThreadStart (t => {
-					((hanHttpClient) t).do_request ();
-				})).Start (this);
-				return true;
-			} catch (Exception ex) {
-				Console.WriteLine ($"Catch Error: {ex.Message}");
-				m_finish = true;
-				return false;
-			}
+	class _hanHttpInit {
+		private _hanHttpInit () {
+			System.Net.ServicePointManager.DefaultConnectionLimit = 200;
+			ServicePointManager.ServerCertificateValidationCallback = new System.Net.Security.RemoteCertificateValidationCallback ((sender, certificate, chain, errors) => { return true; });
 		}
-
-		// 请求变量
-		private hanHttp_UserAgent m_uaType;
-		private string m_strUrl;
-		private Uri m_uri_host;
-		private string m_strType;
-		private StringBuilder m_sbParams = new StringBuilder ();
-		public int m_timeout = 10000;
-
-		// 返回变量
-		public string m_result_data = "";
-		public bool m_finish = false;
-
-		// 请求与返回变量
-		public CookieCollection m_cookies = new CookieCollection ();
+		private static _hanHttpInit m_init = new _hanHttpInit ();
 	}
 }

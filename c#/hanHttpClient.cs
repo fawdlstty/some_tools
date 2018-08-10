@@ -87,6 +87,7 @@ namespace hanHttpLib {
 		private hanUserAgent m_ua;
 		private CookieCollection m_cookies = new CookieCollection ();
 		public static int m_timeout_ms = 10000;
+		public string m_last_url = "";
 
 		// 清除 utf8 bom
 		private static byte [] clear_bom (byte [] data) {
@@ -102,6 +103,19 @@ namespace hanHttpLib {
 		// 请求的实现
 		private byte [] request_impl (string url, string method, byte [] param_data = null, string content_type = "") {
 			// 生成请求
+			if (url.Length < 8 || (url.Substring (0, 7) != "http://" && url.Substring (0, 8) != "https://")) {
+				if (m_last_url == "") {
+					throw new ArgumentException ("url format error");
+				} else if (url [0] == '/') {
+					int p = m_last_url.IndexOf ('/', 8);
+					url = $"{(p >= 0 ? m_last_url.Substring (0, p) : m_last_url)}{url}";
+				} else {
+					int p = m_last_url.LastIndexOf ('/');
+					url = $"{(p >= 8 ? m_last_url.Substring (0, p) : m_last_url)}/{url}";
+				}
+			}
+			m_last_url = url;
+			
 			var uri = new Uri (url); // url.IndexOf ('/', 8) >= 0 ? url.Substring (0, url.IndexOf ('/', 8)) : url
 			HttpWebRequest req = (HttpWebRequest) WebRequest.Create (uri);
 			req.Method = method;
